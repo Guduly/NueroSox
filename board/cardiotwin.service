@@ -1,0 +1,15 @@
+# UNTESTED. Copy to /etc/systemd/system/, then: systemctl daemon-reload && systemctl enable --now cardiotwin
+[Unit]
+Description=CardioTwin on-board capture + twin (research prototype)
+After=multi-user.target
+
+[Service]
+WorkingDirectory=/home/root/afe_data
+ExecStart=/usr/bin/python3 /home/root/afe_data/cardiotwin_board.py --live --profile /home/root/afe_data/AFE4950_Tagged.cfg --state /home/root/afe_data/cardiotwin_state.json --log /home/root/afe_data/cardiotwin_windows.jsonl
+StandardOutput=tty
+TTYPath=/dev/console
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
