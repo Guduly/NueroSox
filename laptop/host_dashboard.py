@@ -14,10 +14,11 @@ import argparse, json, os, sys, threading, time, http.server
 HERE = os.path.dirname(os.path.abspath(__file__))
 KEEP_S = 900.0                      # rolling window kept (default 15 min; change with --keep SECONDS)
 REGIONS = ['heel', 'sole/arch', 'forefoot', 'dorsum/midfoot', 'medial', 'lateral', 'ankle/rearfoot']
-PI_SITE = [0.30, 0.10, 0.05, 0.05, 0.10, 0.10, 0.30]      # placeholders (not from the spec)
+# REGIONS is only the fallback name list for a v1 stream (no "model" in the hello message).  The old static PI_SITE prior split is
+# no longer shown anywhere: region values now come from the board (activity_model.py), per window.
 
 lock = threading.Lock()
-wins, chunks, status = [], [], {"lines": 0, "last": None, "board_note": "", "ver": 0, "gaps": 0}
+wins, chunks, status = [], [], {"lines": 0, "last": None, "board_note": "", "board_version": 1, "model": None, "ver": 0, "gaps": 0}
 
 def ingest(line):
     i = line.find("CT1 ")
@@ -27,7 +28,9 @@ def ingest(line):
     with lock:
         status["lines"] += 1; status["last"] = time.time()
         t = m.get("type")
-        if t == "hello": status["board_note"] = m.get("note", ""); wins.clear(); chunks.clear(); status.pop("hb", None)
+        if t == "hello":
+            status["board_note"] = m.get("note", ""); status["board_version"] = m.get("version", 1); status["model"] = m.get("model")
+            wins.clear(); chunks.clear(); status.pop("hb", None)
         elif t == "hb": status["hb"] = m
         elif t == "window": wins.append(m)
         elif t == "wave":
@@ -39,10 +42,17 @@ def ingest(line):
         del wins[:-int(KEEP_S / 10 + 12)]; del chunks[:-int(KEEP_S / 10 + 6)]
         status["ver"] += 1
 
+def meta():
+    """Display-only facts for the page: board software version, the board's active mapping, host clock and how old the last line is."""
+    with lock: last, hb, ver, model = status["last"], status.get("hb"), status["board_version"], status["model"]
+    now = time.time()
+    return dict(board_version=ver, model=model, hb=hb, now=now, last_line_age=None if last is None else round(now - last, 1))
+
 def build():
     with lock:
         W, C = list(wins), list(chunks)
-    if not C: return dict(sessions=[], b=[-2.5, .6, .9, .6], regions=REGIONS, pi_site=PI_SITE, alpha=.1)
+    names = [r["name"] for r in status["model"]["regions"]] if status["model"] else REGIONS
+    if not C: return dict(sessions=[], b=[-2.5, .6, .9, .6], regions=names, alpha=.1)
     end = C[-1]["t0"] + len(C[-1]["ppg"]) / C[-1]["fsB"]
     toff = max(0.0, end - KEEP_S); toff = (toff // 10) * 10
     C = [c for c in C if c["t0"] >= toff - 0.5]
@@ -58,57 +68,31 @@ def build():
         w = dict(w); w["t0"] -= toff; w["t1"] -= toff; w["site"] = "live (AM62B)"; w.setdefault("z", None); out.append(w)
     s = dict(name="Live from AM62B", base=toff, wins=out, lfhf_session=None, dur=len(ppg) / fsB, fsA=fsA, fsB=fsB,
              ecg=ecg, ppg=ppg, R=R, Ppk=Pk, Ptr=Tr)
-    return dict(sessions=[s], b=[-2.5, .6, .9, .6], regions=REGIONS, pi_site=PI_SITE, alpha=.1)
+    return dict(sessions=[s], b=[-2.5, .6, .9, .6], regions=names, alpha=.1)
 
-POLL = """
-let _ver=-1, paused=false;
-function say(d,extra){$("livestat").textContent=(d.hb?"board: "+d.hb.pkts+" packets, "+d.hb.sec+" s captured, window "+d.hb.k+" · "+d.lines+" lines":"live · "+d.lines+" lines")+(extra||"")}
-$("pausebtn").onclick=()=>{paused=!paused;$("pausebtn").textContent=paused?"Resume":"Pause";if(!paused)_ver=-1;poll()};
-async function poll(){try{
-  if(paused){const r=await fetch("/status.json?"+Date.now());const d=await r.json();say(d," · PAUSED (data still arriving)");return}
-  const r=await fetch("/data.json?"+Date.now());const d=await r.json();
-  if(d.ver!==_ver){_ver=d.ver;const lastSel=S.length?sel.w===S[0].wins.length-1:true;
-   S.length=0;d.sessions.forEach(s=>S.push(s));si=0;
-   if(S.length){const n=S[0].wins.length;sel={s:0,w:(lastSel||sel.w>=n)?Math.max(0,n-1):sel.w};tv=Math.max(0,Math.floor(S[0].dur-vlen))}
-   say(d);
-   if(S.length){agree();render()}}}catch(e){$("livestat").textContent="host server not reachable"}}
-setInterval(poll,3000);poll();
-"""
+def _must_replace(h, old, new):
+    """str.replace that insists on exactly one match: a template edit that changes an anchor must fail loudly, not silently drop a feature."""
+    n = h.count(old)
+    if n != 1: raise RuntimeError("dashboard template anchor matched %d times (expected 1): %r" % (n, old[:90]))
+    return h.replace(old, new)
+
+def _drop_lines(h, marker):
+    lines = h.split("\n"); keep = [l for l in lines if marker not in l]
+    if len(keep) == len(lines): raise RuntimeError("dashboard template line not found: %r" % marker)
+    return "\n".join(keep)
 
 def page():
     h = open(os.path.join(HERE, "dash_template.html"), encoding="utf-8").read()
-    h = h.replace("const D=/*DATA*/null;", 'const D={sessions:[],b:[-2.5,.6,.9,.6],regions:%s,pi_site:%s,alpha:.1};' % (json.dumps(REGIONS), json.dumps(PI_SITE)))
-    h = "\n".join(l for l in h.split("\n") if "Watch readings noted" not in l and "Lower-calf recording:" not in l)
-    h = h.replace('<div class="tip" id="tip"></div>', '<div class="tip" id="tip"></div><div id="livestat" style="position:fixed;right:10px;top:8px;font:12px sans-serif;color:#777">starting…</div>', 1)
-    # the template renders immediately at load: guard for "no data yet"
-    h = h.replace("wgrid();agree();render();\n</script>", "wgrid();\n" + POLL + "</script>")
-    h = h.replace('<label>Length <select id="vlen">', '<button id="pausebtn" type="button" style="font:inherit;padding:3px 12px;margin-right:10px;border:1px solid #888;border-radius:6px;background:transparent;color:inherit;cursor:pointer">Pause</button> <label>Length <select id="vlen">', 1)
-    # show true capture time (the host keeps a rolling window and re-bases it; S[i].base is the offset)
-    h = h.replace('`${f1(w.t0,0)}–${f1(w.t1,0)} s`,"",S[sel.s].name', '`${f1(w.t0+(S[sel.s].base||0),0)}–${f1(w.t1+(S[sel.s].base||0),0)} s`,"",S[sel.s].name', 1)
-    h = h.replace('for(let t=Math.ceil(t0/step)*step;t<=t1;t+=step){const tx=el("text",{x:X(t),y:H-6,"text-anchor":"middle"},ax);tx.textContent=t+" s"}',
-                  'const bb=S[si].base||0;for(let ta=Math.ceil((t0+bb)/step)*step;ta<=t1+bb;ta+=step){const t=ta-bb;const tx=el("text",{x:X(t),y:H-6,"text-anchor":"middle"},ax);tx.textContent=ta+" s"}', 1)
-    h = h.replace('`${f1(t0)}–${f1(t1)} s of ${f1(s.dur,0)} s`', '`${f1(t0+(s.base||0))}–${f1(t1+(s.base||0))} s of ${f1(s.dur+(s.base||0),0)} s`', 1)
-    h = h.replace('`${s.name} · ${f1(w.t0,0)}–${f1(w.t1,0)} s · `', '`${s.name} · ${f1(w.t0+(s.base||0),0)}–${f1(w.t1+(s.base||0),0)} s · `', 1)
-    h = h.replace('[s.name,f1(w.t0,0),f1(w.hr_ecg)', '[s.name,f1(w.t0+(s.base||0),0),f1(w.hr_ecg)', 1)
-    # robust vertical scale: ignore the most extreme 0.5 % of samples so a single artifact cannot flatten the trace
-    h = h.replace('let lo=Infinity,hi=-Infinity;for(let i=i0;i<=i1;i++){if(y[i]<lo)lo=y[i];if(y[i]>hi)hi=y[i]}',
-                  'let lo=Infinity,hi=-Infinity;{const v=y.slice(i0,i1+1).sort((a,b)=>a-b);if(v.length){lo=v[Math.floor(v.length*.002)];hi=v[Math.ceil(v.length*.998)-1]}}', 1)
-    h = h.replace('let d="";for(let i=i0;i<=i1;i++){d+=(i===i0?"M":"L")+X(i/fs).toFixed(1)+" "+Y(y[i]).toFixed(1)}',
-                  'const Yc=v=>Y(Math.max(lo,Math.min(hi,v)));let d="";for(let i=i0;i<=i1;i++){d+=(i===i0?"M":"L")+X(i/fs).toFixed(1)+" "+Yc(y[i]).toFixed(1)}', 1)
-    i = h.find("marks.forEach(")                       # keep beat markers inside the plot when a spike is clipped
-    if i >= 0:
-        j = h.find("\n", i); h = h[:i] + h[i:j].replace("Y(yy)", "Yc(yy)") + h[j:]
-    for fn in ("render", "waves", "timeline"):
-        h = h.replace("function %s(){" % fn, "function %s(){if(!S.length)return;" % fn, 1)
-    return h
+    # the template polls /data.json itself; the host only seeds an empty data set (region names for a v1 stream)
+    return _must_replace(h, "const D=/*DATA*/null;", 'const D={sessions:[],b:[-2.5,.6,.9,.6],regions:%s,alpha:.1};' % json.dumps(REGIONS))
 
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         if self.path.startswith("/status.json"):
-            body = json.dumps(dict(ver=status["ver"], lines=status["lines"], hb=status.get("hb"))).encode(); ct = "application/json"
+            body = json.dumps(dict(dict(ver=status["ver"], lines=status["lines"]), **meta())).encode(); ct = "application/json"
         elif self.path.startswith("/data.json"):
-            d = build(); d["ver"] = status["ver"]; d["lines"] = status["lines"]; d["gaps"] = status["gaps"]; d["hb"] = status.get("hb")
+            d = build(); d["ver"] = status["ver"]; d["lines"] = status["lines"]; d["gaps"] = status["gaps"]; d.update(meta())
             body = json.dumps(d).encode(); ct = "application/json"
         else: body = page().encode(); ct = "text/html; charset=utf-8"
         self.send_response(200); self.send_header("Content-Type", ct); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)

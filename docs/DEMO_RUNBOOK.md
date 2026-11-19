@@ -66,13 +66,20 @@
    | ~25–55 s | First 3 good windows are **baseline warm-up** (white bars) |
    | after ~55 s | **Scored** windows (blue bars) every 10 s |
 
+   **Recommended:** add `--calibrate-rest 60` (the subject sits still for the first minute so the board learns their own resting heart rate), or `--rest-hr 88` if you know it. Add `--raw-out /root/afe_data/run1.jsonl` to also save the raw data for replay.
+
    Terminal A fills with lines of numbers. That is normal, so don't type in it.
 
-9. **During the talk, in the browser:**
-   - **Pause** freezes the graph to explain it; data keeps recording. Click **Resume** to jump to live.
-   - **Length** dropdown switches between 10 s for detail and 1 min for the overview.
-   - **Click a bar** in the "Twin intensity" chart to show that window's numbers and its quality-gate reason.
-   - A window shown as gated (hatched) means the quality check rejected it, for example because of movement or poor contact. Point this out: it's a feature.
+9. **During the talk, in the browser (Live tab, one screen):**
+   - **Top row:** activity (sitting / walking / uncertain), inferred strain, heart rate, resting level, signal quality, then the current window's pulse rate, HRV, pulse arrival, perfusion and beat match.
+   - **Foot (left):** regions shaded by the board's *model projection* for the next 2 min. Darker = more projected load; an orange dot means the region is above the alert level. "Top of foot" and "ankle" are not on the sole, so they are shown as dots beside it. Hatched grey means no data, stale or poor contact. Never call a grey foot "no risk".
+   - **Signals (right):** live ECG and pulse. **Pause** freezes them (data keeps recording); the slider and length menu move and zoom.
+   - **Last 5 minutes (bottom):** click a column to review that moment (badge changes to "Reviewing"; click "Back to live").
+   - If the board stops, a red bar says how long it has been, and the values are hidden rather than shown as current.
+   - **History tab:** full region heatmap and twin intensity. **Model tab:** region weights and how to read the page.
+   - Walking needs two consecutive windows, so it appears 20-30 s after a change. Inferred strain is a model index, **not muscle tension**.
+   - **What to say:** "These are model projections from one sensor, not measured pain locations. Thresholds were tuned on one person's sitting and walking recordings and are not validated."
+   - **Do not say:** that it detects pain, muscle tension or injury, or that the subject "walked" (say "the model labels this walking").
    - *Optional:* the subject can do something that changes physiology, such as raising an arm or a few deep breaths, to show the score changing. Change only one thing.
 
 10. **Stop**

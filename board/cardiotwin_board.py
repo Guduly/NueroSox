@@ -15,6 +15,8 @@ Modes
                                            NOT yet run on real hardware)
 """
 import argparse, importlib.util, json, math, os, queue, signal, sys, threading, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import activity_model as am     # activity / strain / area projections (stdlib only; config in twin_config.json)
 
 # ----------------------------------------------------------------------------- parameters (from spec / assumptions)
 WIN_S, HOP_S = 20.0, 10.0          # feature window and hop
@@ -102,6 +104,18 @@ def detrend_linear(y):
     return [v - (ym + s * (i - xm)) for i, v in enumerate(y)]
 
 
+def qrs_blanked_lf(x, R, fa, i0, i1, decim=10):
+    """Slow ECG content (baseline wander / electrode-cable motion) for the activity model: low-pass 6 Hz and high-pass 0.45 Hz,
+    linearly interpolate over -80..+120 ms around each R peak (QRS removed), keep samples [i0, i1), take every `decim`-th
+    (about the PPG rate).  O(n), stdlib only."""
+    y = sosfiltfilt(x, [lowpass(6, fa), highpass(0.45, fa)], int(fa)); n = len(y)
+    for r in R:
+        a, b = max(0, r - int(0.08 * fa)), min(n - 1, r + int(0.12 * fa))
+        if b - a < 2: continue
+        ya, yb = y[a], y[b]
+        for i in range(a + 1, b): y[i] = ya + (yb - ya) * (i - a) / (b - a)
+    return y[i0:i1:decim]
+
 # ----------------------------------------------------------------------------- twin state (EMA baselines)
 class EMA:
     def __init__(s, name): s.n, s.m, s.v, s.k, s.buf = name, 0.0, 0.0, 0, []
@@ -119,18 +133,20 @@ class EMA:
 
 class Twin:
     def __init__(s, state_path=None, reset=False):
-        s.path = state_path; s.e = {"pat": EMA("pat"), "lnpi": EMA("lnpi")}
+        s.path = state_path; s.e = {"pat": EMA("pat"), "lnpi": EMA("lnpi")}; s.ext = None   # ext: activity/area state (optional in old files)
         if s.path and not reset and os.path.exists(s.path):
             try:
                 d = json.load(open(s.path))
                 for k in s.e: s.e[k].load(d[k])
+                s.ext = d.get("ext")
             except Exception as ex:
                 print("state file unreadable, starting fresh:", ex, file=sys.stderr)
+    get_ext = None                                          # set by Pipeline: returns the Analytics state to persist
     def save(s):
         if not s.path: return
         tmp = s.path + ".tmp"                               # atomic: a power cut leaves the old file intact
         with open(tmp, "w") as f:
-            json.dump({k: v.dump() for k, v in s.e.items()}, f); f.flush(); os.fsync(f.fileno())
+            json.dump(dict({k: v.dump() for k, v in s.e.items()}, ext=s.get_ext() if s.get_ext else s.ext), f); f.flush(); os.fsync(f.fileno())
         os.replace(tmp, s.path)
     def score(s, w):
         w["I"] = None; w["u"] = None
@@ -143,14 +159,15 @@ class Twin:
             u1, u2, u3 = abs(z["pat"]), -z["lnpi"], 0.0      # LF/HF needs >= 60 s of beats: not available per window
             eta = B_PRIOR[0] + B_PRIOR[1] * u1 + B_PRIOR[2] * u2 + B_PRIOR[3] * u3
             w["u"] = [u1, u2, u3]; w["I"] = 1 / (1 + math.exp(-eta)); w["lfhf_used"] = False
-        for k, v in vals.items(): s.e[k].update(v)           # baseline updated AFTER scoring
-        s.save()
+        for k, v in vals.items(): s.e[k].update(v)           # baseline updated AFTER scoring (saved once per window by the pipeline)
 
 
 # ----------------------------------------------------------------------------- pipeline
 class Pipeline:
-    def __init__(s, emit, twin):
+    def __init__(s, emit, twin, cfg=None):
         s.emit, s.twin = emit, twin
+        s.cfg = cfg or am.load_config()
+        s.an = am.Analytics(s.cfg, twin.ext); twin.get_ext = s.an.dump
         s.A, s.B = [], []                    # ECG / PPG samples still in memory (older ones are trimmed)
         s.offA = s.offB = 0                  # number of samples already trimmed from the front
         s.n_pkt, s.t_first, s.t_last = 0, None, None
@@ -213,6 +230,7 @@ class Pipeline:
         # ---- PPG
         fB = sosfiltfilt(detrend_linear(Braw), [highpass(0.7, fb), lowpass(2.5, fb)], int(fb))
         sdB = std(fB)
+        dc_all = mean(s.getB(int(t0 * fb), int(t1 * fb)))
         tP = [g0 + i / fb for i in pick_peaks(fB, int(0.4 * fb), min_prom=0.3 * sdB)]
         tT = [g0 + i / fb for i in pick_peaks([-v for v in fB], int(0.4 * fb), min_prom=0.3 * sdB)]
         # ---- window features
@@ -249,6 +267,21 @@ class Pipeline:
             w.update(hr_ecg=hr_e, hr_ppg=hr_p, rmssd_ms=rmssd, pat_ms=pat, pi_pct=pi, beat_match=match, ppg_dc=dc, ecg_sat=sat,
                      ecg_ok=bool(ecg_ok), ppg_ok=ppg_ok, usable=bool(ecg_ok and ppg_ok), reason="; ".join(why) if why else "ok")
         s.twin.score(w)
+        # ---- inputs for the activity / strain / area model (see activity_model.py); heavy signals only when they are needed
+        ihr = [60.0 / d for d in okr] if w.get("hr_ecg") is not None else []
+        contact = abs(dc_all) > DC_MIN
+        mot_sig = ecg_lf = None
+        if contact:                                        # PPG rhythm analysis needs a PPG signal
+            mot_full = sosfiltfilt(detrend_linear(Braw), [highpass(0.45, fb)], int(fb))
+            mot_sig = mot_full[int((t0 - g0) * fb):int((t1 - g0) * fb)]
+        if ihr:                                            # ECG rhythm check needs reliable beats (to blank the QRS)
+            ecg_lf = qrs_blanked_lf(x, R, fa, int((t0 - g0) * fa), int((t1 - g0) * fa))
+        ctx = dict(ecg_reliable=bool(ihr), hr=w.get("hr_ecg"), rmssd=w.get("rmssd_ms"), ihr_lo=percentile(ihr, 5) if ihr else None,
+                   ihr_hi=percentile(ihr, 95) if ihr else None, ppg_dc=dc_all, contact=contact, fb=fb, mot_sig=mot_sig, ecg_lf=ecg_lf,
+                   ppg_usable=bool(w.get("usable")), ppg_reason=w.get("reason", ""), u=w.get("u"), t_mid=0.5 * (t0 + t1),
+                   ln_pi=math.log(w["pi_pct"]) if w.get("pi_pct") else None)
+        s.an.update(w, ctx)
+        s.twin.save()                                      # persist twin + analytics state together
         s.emit(w)
         # ---- waveform chunk for the host: interior 10 s (first window also sends the first 10 s)
         c0 = 0.0 if w["k"] == 0 else t0 + HOP_S
@@ -344,13 +377,24 @@ def main():
     ap.add_argument("--state", default="cardiotwin_state.json"); ap.add_argument("--reset", action="store_true")
     ap.add_argument("--log", default="cardiotwin_windows.jsonl")
     ap.add_argument("--raw-out", help="live: also save the raw EVM packets to this .jsonl file (replayable with --replay)")
+    ap.add_argument("--rest-hr", type=float, help="resting heart rate of this person (bpm); replaces the 72 bpm population default and any saved floor")
+    ap.add_argument("--calibrate-rest", type=float, default=0, metavar="SEC", help="learn the resting heart rate from the first SEC seconds (e.g. 60); the person must sit still")
+    ap.add_argument("--config", help="activity/strain/area model config (default: twin_config.json next to this file, else built-in defaults)")
     ap.add_argument("--start-delay", type=float, default=0, help="wait N s before starting (time to close picocom and open the host display)")
     a = ap.parse_args()
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))   # kill/systemd stop -> stop capture cleanly
     time.sleep(a.start_delay)
+    here = os.path.dirname(os.path.abspath(__file__)); cfgp = a.config or os.path.join(here, "twin_config.json")
+    try: cfg = am.load_config(cfgp if os.path.exists(cfgp) else None)
+    except (ValueError, KeyError, TypeError, OSError) as ex: sys.exit("config error (%s): %s" % (cfgp, ex))   # before capture starts
     out = Output(a.log); emit = out.emit
-    pipe = Pipeline(emit, Twin(a.state, a.reset))
-    emit(dict(type="hello", version=1, note="research prototype, not diagnostic; stream roles/units inferred"))
+    if a.rest_hr is not None: cfg["activity"].update(resting_hr_prior_bpm=a.rest_hr, force_rest_hr=True)
+    if a.calibrate_rest: cfg["activity"]["calibrate_rest_s"] = a.calibrate_rest
+    try: am.validate_config(cfg)
+    except (ValueError, KeyError, TypeError) as ex: sys.exit("option error: %s" % ex)
+    pipe = Pipeline(emit, Twin(a.state, a.reset), cfg)
+    emit(dict(type="hello", version=2, note="research prototype, not diagnostic; stream roles/units inferred; activity, strain and area values are model projections",
+              model=am.config_summary(cfg)))
     try:
         replay(a.replay, pipe, a.realtime, a.speed) if a.replay else live(a, pipe)
     except KeyboardInterrupt:

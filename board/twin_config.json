@@ -1,0 +1,190 @@
+{
+ "version": 2,
+ "activity": {
+  "spec_hz": [
+   0.5,
+   4.0
+  ],
+  "freq_step_hz": 0.05,
+  "stride_band_hz": [
+   0.55,
+   1.3
+  ],
+  "noise_band_hz": [
+   0.55,
+   2.6
+  ],
+  "cardiac_tol_hz": 0.1,
+  "cardiac_harmonics": 3,
+  "min_ppg_dc": 300000.0,
+  "min_sharp": 4.0,
+  "ratio_walk": [
+   0.7,
+   1.5
+  ],
+  "ratio_still": 0.6,
+  "purity_still": [
+   0.35,
+   0.5
+  ],
+  "purity_low": 0.35,
+  "hr_elev_bpm": [
+   10.0,
+   30.0
+  ],
+  "resting_hr_prior_bpm": 72.0,
+  "force_rest_hr": false,
+  "calibrate_rest_s": 0.0,
+  "hr_ref_down": 0.3,
+  "hr_ref_up": 0.02,
+  "hr_ref_min": 40.0,
+  "hr_ref_up_purity": 0.8,
+  "sit_max_hr_elev_bpm": 15.0,
+  "sit_min_purity": 0.6,
+  "cad_persist_hz": 0.25,
+  "ecg_agree_hz": 0.1,
+  "ecg_min_sharp": 5.0,
+  "w": {
+   "cadence": 1.6,
+   "purity": 3.0,
+   "harm2": 0.3,
+   "ecg_agree": 0.6,
+   "persistence": 0.5,
+   "hr_elev": 0.6
+  },
+  "walk_score": 0.8,
+  "still_score": 0.3,
+  "min_conf": 0.4
+ },
+ "strain": {
+  "w": {
+   "hr": 0.6,
+   "hrv": 0.25,
+   "perf": 0.15,
+   "pat": 0.2,
+   "hr_trend": 0.4,
+   "pi_trend": 0.1,
+   "walk": 0.5
+  },
+  "hr_scale_bpm": 25.0,
+  "hr_trend_scale": 20.0,
+  "pi_trend_scale": 0.3,
+  "deadband_sd": 1.5,
+  "twin_cap": 1.5,
+  "trend_windows": 6,
+  "trend_min_points": 4,
+  "hrv_sd_floor": 0.25,
+  "ema_alpha": 0.1
+ },
+ "region_model": {
+  "features": [
+   "walk",
+   "walk_exposure",
+   "strain",
+   "strain_rise",
+   "perf_drop",
+   "pat_shift"
+  ],
+  "hop_s": 10.0,
+  "horizon_windows": 12,
+  "alpha_load": 0.2,
+  "exposure_alpha": 0.1,
+  "rise_scale_per_min": 0.3,
+  "gain": 1.6,
+  "elevated_threshold": 0.5,
+  "regions": [
+   {
+    "name": "heel",
+    "bias": -2.4,
+    "w": [
+     1.2,
+     0.8,
+     0.5,
+     0.3,
+     0.3,
+     0.0
+    ],
+    "why": "hypothesis: impact loading in gait; PPG site is adjacent (perfusion shift)"
+   },
+   {
+    "name": "sole/arch",
+    "bias": -2.6,
+    "w": [
+     0.6,
+     1.4,
+     0.6,
+     0.3,
+     0.0,
+     0.0
+    ],
+    "why": "hypothesis: sustained loading, so it weights accumulated walking exposure"
+   },
+   {
+    "name": "forefoot",
+    "bias": -2.6,
+    "w": [
+     1.3,
+     0.4,
+     0.8,
+     0.4,
+     0.0,
+     0.0
+    ],
+    "why": "hypothesis: push-off loading, responds to walking and overall strain"
+   },
+   {
+    "name": "dorsum/midfoot",
+    "bias": -2.8,
+    "w": [
+     0.3,
+     0.2,
+     0.5,
+     0.6,
+     0.6,
+     0.6
+    ],
+    "why": "hypothesis: tendon/vascular, so rising strain, perfusion and timing shifts"
+   },
+   {
+    "name": "medial",
+    "bias": -2.7,
+    "w": [
+     0.7,
+     0.9,
+     0.4,
+     0.2,
+     0.0,
+     0.2
+    ],
+    "why": "hypothesis: stability loading; not distinguishable from lateral by this sensor"
+   },
+   {
+    "name": "lateral",
+    "bias": -2.7,
+    "w": [
+     0.9,
+     0.6,
+     0.4,
+     0.4,
+     0.2,
+     0.2
+    ],
+    "why": "hypothesis: stability loading; not distinguishable from medial by this sensor"
+   },
+   {
+    "name": "ankle/rearfoot",
+    "bias": -2.4,
+    "w": [
+     0.5,
+     0.5,
+     0.6,
+     0.5,
+     1.2,
+     0.8
+    ],
+    "why": "hypothesis: nearest the Achilles PPG site, so perfusion and pulse-timing shifts weigh most"
+   }
+  ]
+ },
+ "tuned": "v2c: tuned 2026-11-19 on one subject (sit_clean 19 windows, walk3 21 windows, --rest-hr 90); see TUNING_v2c.md"
+}

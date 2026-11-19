@@ -99,7 +99,7 @@ PPG sensor (lower calf) ─┴─► AFE4950EVM ──USB──► SK-AM62B: car
     - Z-scores, clipped to ±4.
     - u1 = |z_PAT|, u2 = −z(ln PI), u3 = z(ln LF/HF). u3 is currently fixed at 0, because LF/HF needs at least about 60 s of beats.
     - I = sigmoid(b0 + b1·u1 + b2·u2 + b3·u3), with b = (−2.5, 0.6, 0.9, 0.6). These are fixed hand-set values, not learned.
-    - Region split: softmax(W·u) with site prior π over 7 regions (heel, sole/arch, forefoot, dorsum/midfoot, medial, lateral, ankle/rearfoot). π and W are **placeholders**.
+    - Region split (replaced 2026-11-17): the static softmax split with a site prior π is no longer shown. `activity_model.py` now computes, per window, an activity label (sitting / walking / uncertain, from ECG+PPG only), an inferred strain index and 7 per-region projected indices, `area = sigmoid(bias + gain·projected load)`. Weights are in `twin_config.json` and are **hand-set hypotheses**. See `docs/ARCHITECTURE_activity_strain_areas.md`.
     - The baseline is saved atomically to `cardiotwin_state.json` after each window, so it is power-loss safe.
   - **Output:** one JSON line per message, `CT1 {...}`, with types hello, window, wave and hb. Window results are fsynced to `cardiotwin_windows.jsonl`.
   - **Robustness:**
@@ -115,7 +115,7 @@ PPG sensor (lower calf) ─┴─► AFE4950EVM ──USB──► SK-AM62B: car
     - zoom from 5 s to 5 min, and pause/resume
     - window KPI tiles with the quality-gate reason
     - twin intensity timeline (scored, warm-up, gated)
-    - region panel with editable π and W
+    - foot area projection and activity card (board-computed; replaces the old editable π/W region panel), history strips and a read-only view of the board's mapping
     - an "established vs not" panel
   - Keeps 15 minutes of history (`--keep`).
 
@@ -165,14 +165,14 @@ One packet per line:
 **Not done:**
 - Per-window LF/HF.
 - Any pain or stress labels.
-- Any validation of the region split.
+- Any validation of the region split, of the activity label, or of the strain index. One labelled sitting and one labelled walking recording exist (2026-11-18, second subject); the v2c config was tuned on them, so they are not a test set.
 - EMG.
 - Activity data (accelerometer or IMU).
 - Autostart service on the board (`cardiotwin.service` exists but is untested).
 
 ---
 
-## 5. Data collected so far (single subject: a team member)
+## 5. Data collected so far (a team member; `sit_clean` and `walk3` are a second subject)
 
 | File | Site | Condition | Quality notes |
 |---|---|---|---|
@@ -183,6 +183,8 @@ One packet per line:
 | `calf_01.jsonl` | lower calf, strapped | rest (to confirm) | not yet analysed |
 | `stress.jsonl` | **site to confirm** | "stress" (**stressor, timing and duration to document**) | not yet analysed |
 | `demo_session.jsonl` | joined ecg_ppg1, 2, 3 and achilles1 | demo only | not for training |
+| `sit_clean.jsonl` | second subject (resting HR about 90 bpm), sensors on the foot/ankle | **seated still, whole run** (about 3 min 20 s) | ECG good in all 19 windows; PPG dropped out in windows 3–5, 10, 16–18. Replay with `--rest-hr 90` |
+| `walk3.jsonl` | same subject and placement | **walking, whole run** (about 3.5 min) | ECG good in all 21 windows; PPG motion-corrupted (expected). Replay with `--rest-hr 90` |
 
 On the demo session the twin scored about 0.3 at rest and 0.04–0.12 with minor movement. With the arm raised it scored about 0.8, and it rejected every calf window as poor contact. This is a single-subject behaviour check, not evidence about pain.
 
@@ -299,7 +301,10 @@ Every step must keep the rule that **the board computes and the laptop displays*
 - Feed z(ln LF/HF) into u3, with an SD floor of 0.30.
 - Gate it on beat quality.
 
-### D6. Region model as a config file (board side)
+### D6. Region model as a config file (board side): DONE in config form (2026-11-17), still unvalidated
+- Status: weights and thresholds live in `board/twin_config.json`; the board computes the per-region values and the dashboard only displays them and exports an edited copy. Not done: fixed b, α and SD floors are still constants in the board code (not in the config); no data supports any difference between regions.
+- Activity and inferred strain (added with D6): implemented and unit/synthetic tested. Thresholds were tuned (v2c, `docs/TUNING_v2c.md`) on one labelled sitting and one labelled walking recording from one person; **accuracy on new people or sessions is unmeasured**. Real-recording observations are in `tests/out/observations.md`.
+- Original D6 text:
 - Move π and W from the dashboard into `twin_config.json` on the board. Include the fixed b, α and SD floors.
 - The board computes the 7-region split and outputs it in each window message.
 - The dashboard only shows it. Editing in the dashboard becomes "export config", which is copied to the board.
