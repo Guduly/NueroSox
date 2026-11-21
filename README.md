@@ -1,4 +1,4 @@
-# NeuroSox / CardioTwin
+# NeuroSox
 
 A sock-mounted ECG + PPG prototype. A TI AFE4950 EVM records the signals and a TI SK-AM62B board computes everything on the board itself, using the Python standard library only. A laptop shows the results in a browser.
 
